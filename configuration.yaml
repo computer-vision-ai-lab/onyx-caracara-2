@@ -37,8 +37,8 @@ llm_clients:
     base_url: "http://localhost:8001/v1"
     api_key: "local"
     vllm:
-      model: "computer-vision-ai-lab/Qwen-3.6-27B-SlateKestrel"
-      revision: "8c4897b8e678f52cf4b28b84a54b72fe81f2924b"
+      model: "computer-vision-ai-lab/Qwen-3.6-27B-UmberShrike"
+      revision: "163c2f4168cfc86b047ea8226e0d06214005e123"
       gpu_ids: "0,1"
       tensor_parallel_size: 1
       data_parallel_size: 2
@@ -72,7 +72,7 @@ embedder:
 actors:
   planner:
     client: "coder-instance"
-    model: "computer-vision-ai-lab/Qwen-3.6-27B-SlateKestrel"
+    model: "computer-vision-ai-lab/Qwen-3.6-27B-UmberShrike"
     workers: 256
     queue_size: 128
     max_tokens: 32768
@@ -90,7 +90,7 @@ actors:
       allow_fallbacks: true
   coder:
     client: "coder-instance"
-    model: "computer-vision-ai-lab/Qwen-3.6-27B-SlateKestrel"
+    model: "computer-vision-ai-lab/Qwen-3.6-27B-UmberShrike"
     workers: 96
     queue_size: 64
     max_tokens: 24576
