@@ -15,6 +15,7 @@ from logger_config import logger
 from modules.base import BaseModule
 from modules.renderer.grid import GRID_KEYS, GRID_VIEWS, compose_grid
 from modules.renderer.settings import RendererConfig
+from pipeline.batch_stats import STATS
 from pipeline.task import PipelineTask
 
 _RUNNER_JS = Path(__file__).parent / "render_service" / "render_runner.mjs"
@@ -96,6 +97,7 @@ class RendererModule(BaseModule):
 
     async def _supervise(self, slot: _Slot) -> None:
         backoff = self._SPAWN_BACKOFF_INITIAL_S
+        spawned = 0
         while not self._shutting_down:
             try:
                 sc = await self._spawn_sidecar(slot.idx)
@@ -105,10 +107,14 @@ class RendererModule(BaseModule):
                 logger.warning(
                     f"[RENDERER] sidecar #{slot.idx} spawn failed: {exc} — retry in {backoff:.0f}s"
                 )
+                STATS.sidecar_spawn_fail()
                 await asyncio.sleep(backoff + random.uniform(0.0, 0.5))
                 backoff = min(backoff * 2.0, self._SPAWN_BACKOFF_MAX_S)
                 continue
 
+            if spawned:
+                STATS.sidecar_restart()  # a re-spawn after a monitored death (miner-diag `render=.../restarts`)
+            spawned += 1
             ready_at = time.monotonic()
             slot.sidecar = sc
             try:
@@ -366,8 +372,11 @@ class RendererModule(BaseModule):
         t0 = time.monotonic()
         try:
             resp, sidecar_idx = await self._post_with_retry("/render/views", payload)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             task.render_errors = [f"{type(exc).__name__}: {exc}"]
+            STATS.render_done(time.monotonic() - t0, False)
             logger.warning(
                 f"[RENDERER] '{task.stem}' FAIL (http) | {task.render_errors[0]}"
             )
@@ -378,6 +387,7 @@ class RendererModule(BaseModule):
         if resp.status_code != 200:
             detail = resp.text[:200] if resp.text else ""
             task.render_errors = [f"HTTP {resp.status_code}: {detail}"]
+            STATS.render_done(task.render_ms / 1000.0, False)
             logger.warning(
                 f"[RENDERER] '{task.stem}' FAIL (status) sidecar=#{sidecar_idx} | "
                 f"{task.render_errors[0]} | render={task.render_ms/1000:.1f}s"
@@ -398,12 +408,14 @@ class RendererModule(BaseModule):
             )
         except (KeyError, ValueError) as exc:
             task.render_errors = [f"grid tile invalid: {exc}"]
+            STATS.render_done(task.render_ms / 1000.0, False)
             logger.warning(
                 f"[RENDERER] '{task.stem}' FAIL (grid) sidecar=#{sidecar_idx} | "
                 f"{task.render_errors[0]}"
             )
             return rendered
 
+        STATS.render_done(task.render_ms / 1000.0, True)
         task.refinement_rendered_pngs.append(task.rendered_png)
         logger.info(
             f"[RENDERER] '{task.stem}' PASS sidecar=#{sidecar_idx} | "

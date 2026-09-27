@@ -91,6 +91,44 @@ def host_info() -> dict:
                 break
     except Exception:
         pass
+    out.update(region_info())
+    return out
+
+
+_REGION_ENV = (("dc", "RUNPOD_DC_ID"), ("pod", "RUNPOD_POD_ID"), ("rp_cpus", "RUNPOD_CPU_COUNT"),
+               ("rp_mem_gb", "RUNPOD_MEM_GB"), ("rp_gpu", "RUNPOD_GPU_NAME"))
+
+
+def _ascii(s: str, limit: int = 24) -> str:
+    """Header-safe token: ASCII letters/digits/._- only (Reykjavík -> Reykjavik, spaces -> _)."""
+    import unicodedata
+    s = unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode()
+    s = re.sub(r"\s+", "_", s.strip())
+    return re.sub(r"[^A-Za-z0-9._-]", "", s)[:limit]
+
+
+def region_info() -> dict:
+    """Where this pod runs, for the miner-diag header (so a slow audit host can be reproduced by renting the same
+    datacenter): the RunPod env whitelist above (never the whole environment — it also holds API keys) plus a
+    best-effort public-IP geo lookup (country/city + the hosting ASN, which names the actual machine operator)."""
+    out: dict = {}
+    for key, env in _REGION_ENV:
+        v = os.environ.get(env)
+        if v:
+            out[key] = _ascii(v)
+    try:
+        import urllib.request
+        with urllib.request.urlopen("https://ipinfo.io/json", timeout=6) as r:
+            g = json.loads(r.read().decode())
+        country, city = g.get("country") or "?", g.get("city") or "?"
+        out["geo"] = f"{_ascii(country, 4)}/{_ascii(city, 16)}"
+        org = str(g.get("org") or "")
+        if org:
+            asn, _, name = org.partition(" ")
+            out["asn"] = _ascii(asn, 12)
+            out["org"] = _ascii(name, 20)
+    except Exception as e:
+        print(f"[preflight] geo lookup skipped ({type(e).__name__}: {e})", file=sys.stderr)
     return out
 
 

@@ -13,6 +13,7 @@ from logger_config import logger
 from modules.js_checker.module import JSCheckerModule
 from modules.renderer.module import RendererModule
 from pipeline.factory import build_pipeline
+from pipeline.batch_stats import STATS
 from pipeline.orchestrator import Pipeline
 from pipeline.state import MinerState
 from pipeline.task import PipelineTask
@@ -44,6 +45,38 @@ def _resolve_api_key(name: str, cfg: LLMClientConfig) -> str | None:
     return api_key
 
 
+def _instrument_client(name: str, client: AsyncOpenAI) -> None:
+    """Wrap `client.chat.completions.create` so every call (coder, judge, critic, probe) lands in STATS with its
+    latency and usage. Measurement only: a failure to install the wrapper just logs, and the wrapper re-raises
+    everything untouched (cancellations are not counted as errors)."""
+    try:
+        completions = client.chat.completions
+        orig = completions.create
+
+        async def create(*args, **kwargs):
+            t0 = time.monotonic()
+            ok = True
+            usage = None
+            record = True
+            try:
+                resp = await orig(*args, **kwargs)
+                usage = getattr(resp, "usage", None)
+                return resp
+            except asyncio.CancelledError:
+                record = False
+                raise
+            except Exception:
+                ok = False
+                raise
+            finally:
+                if record:
+                    STATS.llm_call(name, time.monotonic() - t0, usage, ok)
+
+        completions.create = create  # type: ignore[method-assign]
+    except Exception as exc:
+        logger.warning(f"[diag] could not instrument llm client {name}: {exc!r}")
+
+
 class GenerationPipeline:
     """Top-level pipeline driver. Constructed once per app lifecycle."""
 
@@ -56,6 +89,7 @@ class GenerationPipeline:
         self.renderer = RendererModule(settings.renderer)
 
         self._clients: dict[str, AsyncOpenAI] = {}
+        self._client_urls: dict[str, str] = {}
         self._http_client: httpx.AsyncClient | None = None
         self._pipeline: Pipeline | None = None
 
@@ -84,6 +118,15 @@ class GenerationPipeline:
                 f"llm client ready | name={name} base_url={cfg.base_url} "
                 f"local={_is_local_endpoint(cfg.base_url)}"
             )
+            self._client_urls[name] = cfg.base_url
+            _instrument_client(name, self._clients[name])
+        actors = self.settings.actors
+        _roles: dict[str, str] = {}
+        for _c, _r in ((actors.planner.client, "planner"), (actors.critic.client, "critic"),
+                       (actors.judge.client, "judge"), (actors.coder.client, "coder")):  # shared client names: coder/judge win
+            if _c:
+                _roles[_c] = _r
+        STATS.set_roles(_roles)
         limits = httpx.Limits(max_connections=200, max_keepalive_connections=50)
         self._http_client = httpx.AsyncClient(timeout=30.0, limits=limits)
 
@@ -178,6 +221,7 @@ class GenerationPipeline:
                 task.attempt = result.attempt + 1
                 logger.info(f"[Batch retry] {task.stem} | attempt={task.attempt}")
 
+        await self._diag_snapshot("start")
         try:
             logger.info(f"[Batch starting] {len(tasks)} tasks | budget={budget:.0f}s")
             await asyncio.wait_for(
@@ -198,11 +242,29 @@ class GenerationPipeline:
         except asyncio.CancelledError:
             raise
         finally:
+            STATS.end()
+            await self._diag_snapshot("end")
             self._cleanup_batch_memory("Batch")
             logger.info(
                 f"[Batch done] {len(self.state.results)} ok, "
-                f"{len(self.state.failed)} failed"
+                f"{len(self.state.failed)} failed | diag: {' '.join(STATS.header_parts())}"
             )
+
+    async def _diag_snapshot(self, when: str) -> None:
+        """Batch-start / batch-end counters for the miner-diag header: local vLLM servers' /metrics + cgroup cpu.stat."""
+        try:
+            STATS.cgroup_snapshot(when)
+            if self._http_client is None:
+                return
+            local = [(n, u) for n, u in self._client_urls.items() if n in self._clients and _is_local_endpoint(u)]
+            if local:
+                await asyncio.wait_for(
+                    asyncio.gather(*(STATS.vllm_snapshot(n, u, when, self._http_client) for n, u in local),
+                                   return_exceptions=True),
+                    timeout=12.0,
+                )
+        except Exception as exc:
+            logger.debug(f"[diag] snapshot {when} skipped: {exc!r}")
     
     async def run_coder_probe(self) -> float | None:
         """Measure the coder endpoint's aggregate output tok/s with `concurrency` text-only code requests.

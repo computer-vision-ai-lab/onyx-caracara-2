@@ -13,6 +13,9 @@ from pipeline.task import Candidate, PipelineTask
 from utils.http import download_image
 
 
+from pipeline.batch_stats import STATS
+
+
 class StageError(Exception):
     """Raised by a pipeline stage; carries stage name + original cause."""
 
@@ -234,6 +237,7 @@ async def _resolve_bracket(
             )
         winner = left if verdict.winner == "A" else right
         _t_e = time.monotonic()
+        STATS.duel(_t_e - _t_s, _t_s - _t_q)
         logger.info(
             f"[BRACKET {label}] {task.stem} -> k{winner.k} | "
             f"[JUDGE_TIMING] queue_wait={_t_s - _t_q:.1f}s compare={_t_e - _t_s:.1f}s in_flight={sem_judge._value}"

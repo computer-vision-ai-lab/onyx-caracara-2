@@ -14,6 +14,7 @@ from fastapi.responses import Response, StreamingResponse, FileResponse
 
 from config.settings import LLMClientConfig, settings
 from logger_config import logger
+from pipeline.batch_stats import STATS
 from pipeline.generation_pipeline import GenerationPipeline
 from pipeline.state import MinerState, MinerStatus
 from pipeline.task import PipelineTask
@@ -86,6 +87,9 @@ def _load_preflight_metrics() -> None:
     d["mem_gb"] = host.get("mem_gb")
     net = m.get("network") or {}
     d["net_mbps"] = net.get("download_mbps")
+    for k in ("dc", "geo", "asn", "org", "pod", "rp_cpus"):  # region + RunPod ids (preflight.region_info)
+        if host.get(k):
+            d[k] = host[k]
     if gpus:
         names = sorted({str(g.get("gpu_name", "?")).replace("NVIDIA ", "") for g in gpus})
         d["gpus"] = f"{len(gpus)}x{'/'.join(names)}"
@@ -115,6 +119,9 @@ def _diag_header() -> str:
         f"wall={wall if wall is not None else '?'}",
         f"seed={state.seed}",
     ]
+    # where the pod runs (preflight.region_info) + the batch's three-axis accounting (pipeline.batch_stats)
+    parts += [f"{k}={d[k]}" for k in ("dc", "geo", "asn", "org", "pod", "rp_cpus") if d.get(k)]
+    parts += STATS.header_parts()
     line = "// miner-diag: " + " ".join(parts)
     return "".join(ch for ch in line if 32 <= ord(ch) < 127) + "\n"
 
